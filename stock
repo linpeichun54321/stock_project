@@ -125,15 +125,15 @@ if __name__ == "__main__":
         print(f"\n下一次更新: {stock_interval} 秒後")
         time.sleep(stock_interval)
 
-
 # ============
 #建立SQL連線(Azure SQL Database)
 import pyodbc
+print(pyodbc.drivers())
 
-server = 'your_server.database.windows.net'  # Azure SQL Server 名稱
-database = 'your_database'                   # 資料庫名稱
-username = 'your_user'                       # 帳號
-password = 'your_password'                   # 密碼
+server = 'linpeichunhappy.database.windows.net'  # Azure SQL Server 名稱
+database = 'stock_project'                   # 資料庫名稱
+username = 'missa'                       # 帳號
+password = 'Cc12345678'                   # 密碼
 driver = '{ODBC Driver 18 for SQL Server}'   # 建議用最新 ODBC Driver
 
 # 建立連線
@@ -151,4 +151,6 @@ CREATE TABLE stock_close (
 )
 """)
 conn.commit()
+
+print("✅ 連線成功")
 
