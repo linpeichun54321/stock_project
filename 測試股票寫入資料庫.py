@@ -14,32 +14,32 @@ stocks = [
     "LMT", "BA", "TSLA", "^DJI"
 ]
 
-# 更新間隔（秒）
-update_interval = 10 * 60  # 10 分鐘
-
-# 美國東部時區
+stock_interval = 30
+saved_today = set()
+today_date = datetime.now().strftime("%Y-%m-%d")
 eastern = pytz.timezone("US/Eastern")
 
 # =========================
-# CSV 相關函數
-def get_csv_filename():
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    return f"stock_realtime_{date_str}.csv"  # 新 CSV 名稱，區分每日收盤 CSV
+# CSV 檔案名稱
+HIST_CSV_FILE = "stock_close_last_month.csv"
 
-def ensure_csv_file():
-    csv_file = get_csv_filename()
-    if not os.path.exists(csv_file):
-        with open(csv_file, mode='w', newline='', encoding='utf-8-sig') as f:
+def ensure_history_csv():
+    if not os.path.exists(HIST_CSV_FILE):
+        with open(HIST_CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
-            writer.writerow(["日期", "股票", "即時價", "開盤", "最高", "最低", "收盤", "成交量"])
-    return csv_file
+            writer.writerow(["日期", "股票", "收盤價"])
+
+def save_history_csv(stock_id, date_str, close_price):
+    with open(HIST_CSV_FILE, mode='a', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow([date_str, stock_id, close_price])
 
 # =========================
-# SQL Server 連線設定
+# SQL Server 連線
 server = 'linpeichunhappy.database.windows.net'
 database = 'stock_project'
 username = 'missa'
-password = 'Cc12345678'  # ⚠️ 建議改成環境變數
+password = 'Cc12345678'
 driver = '{ODBC Driver 18 for SQL Server}'
 
 conn = pyodbc.connect(
@@ -47,45 +47,49 @@ conn = pyodbc.connect(
 )
 cursor = conn.cursor()
 
-# 建表（如果不存在）
-cursor.execute("""
-IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='stock_realtime' AND xtype='U')
-CREATE TABLE stock_realtime (
-    record_time DATETIME,
-    stock_id NVARCHAR(10),
-    price FLOAT,
-    open_price FLOAT,
-    high FLOAT,
-    low FLOAT,
-    close_price FLOAT,
-    volume BIGINT,
-    PRIMARY KEY(record_time, stock_id)
-)
-""")
-conn.commit()
 print("✅ SQL 連線成功")
 
 # =========================
-# 抓股票資料
+# 自動檢查並建立 dbo.stock_close
+def ensure_sql_table():
+    cursor.execute("""
+    IF NOT EXISTS (
+        SELECT * FROM sysobjects WHERE name='stock_close' AND xtype='U'
+    )
+    CREATE TABLE dbo.stock_close (
+        date DATE,
+        stock_id NVARCHAR(10),
+        close_price FLOAT,
+        PRIMARY KEY(date, stock_id)
+    )
+    """)
+    conn.commit()
+    print("✅ SQL 表格 dbo.stock_close 已確認或建立完成")
+
+ensure_sql_table()  # 啟動時先確認
+
+# =========================
+def is_us_market_closed():
+    now = datetime.now(eastern)
+    return now.hour >= 16
+
+# =========================
 def get_stock_data(stock_id):
     stock = yf.Ticker(stock_id)
     try:
         df_day = stock.history(period="1d")
         if df_day.empty:
-            open_price = high = low = close_price = volume = None
+            open_price = high = low = close = volume = "無資料"
         else:
             last_day = df_day.iloc[-1]
             open_price = last_day["Open"]
             high = last_day["High"]
             low = last_day["Low"]
-            close_price = last_day["Close"]
+            close = last_day["Close"]
             volume = last_day["Volume"]
 
         df_min = stock.history(period="1d", interval="1m")
-        if df_min.empty:
-            price = None
-        else:
-            price = df_min["Close"].iloc[-1]
+        price = df_min["Close"].iloc[-1] if not df_min.empty else "無資料"
 
         return {
             "股票": stock_id,
@@ -93,73 +97,103 @@ def get_stock_data(stock_id):
             "開盤": open_price,
             "最高": high,
             "最低": low,
-            "收盤": close_price,
+            "收盤": close,
             "成交量": volume
         }
-    except Exception as e:
-        print(f"❌ {stock_id} 抓取失敗: {e}")
+    except Exception:
         return {
             "股票": stock_id,
-            "即時價": None,
-            "開盤": None,
-            "最高": None,
-            "最低": None,
-            "收盤": None,
-            "成交量": None
+            "即時價": "錯誤",
+            "開盤": "-",
+            "最高": "-",
+            "最低": "-",
+            "收盤": "-",
+            "成交量": "-"
         }
 
 # =========================
-# 寫入 SQL
-def save_to_sql(data):
-    now_time = datetime.now(eastern)
+def save_close_price(stock_id, close_price, date_str=None):
+    global saved_today, today_date
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    csv_file = f"stock_close_{date_str}.csv"
+
+    if date_str != today_date:
+        saved_today = set()
+        today_date = date_str
+
+    if (date_str, stock_id) in saved_today:
+        return
+
+    if close_price in ["-", "無資料"]:
+        return
+
+    # CSV 寫入
+    with open(csv_file, mode='a', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow([date_str, stock_id, close_price])
+
+    # SQL 寫入
     try:
         cursor.execute("""
         IF NOT EXISTS (
-            SELECT 1 FROM stock_realtime
-            WHERE record_time = ? AND stock_id = ?
+            SELECT 1 FROM dbo.stock_close WHERE date = ? AND stock_id = ?
         )
-        INSERT INTO stock_realtime
-        (record_time, stock_id, price, open_price, high, low, close_price, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, now_time, data["股票"],
-             now_time, data["股票"], data["即時價"], data["開盤"],
-             data["最高"], data["最低"], data["收盤"], data["成交量"])
+        INSERT INTO dbo.stock_close (date, stock_id, close_price) VALUES (?, ?, ?)
+        """, date_str, stock_id, date_str, stock_id, float(close_price))
         conn.commit()
     except Exception as e:
-        print(f"❌ SQL 寫入失敗 {data['股票']}: {e}")
+        print(f"❌ SQL寫入失敗: {stock_id} {date_str}, {e}")
+
+    saved_today.add((date_str, stock_id))
 
 # =========================
-# 寫入 CSV
-def save_to_csv(data):
-    csv_file = ensure_csv_file()
-    now_time = datetime.now(eastern).strftime("%Y-%m-%d %H:%M:%S")
-    with open(csv_file, mode='a', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            now_time, data["股票"], data["即時價"], data["開盤"],
-            data["最高"], data["最低"], data["收盤"], data["成交量"]
-        ])
-
-# =========================
-# 顯示即時
 def display_realtime(stock_data_list):
+    os.system('cls' if os.name == 'nt' else 'clear')
     print(f"{datetime.now()} 即時股價更新:")
     print(f"{'股票':<8} {'即時價':>10} {'開盤':>10} {'最高':>10} {'最低':>10} {'收盤':>10} {'成交量':>15}")
-    print("-"*90)
-    for d in stock_data_list:
-        print(f"{d['股票']:<8} {d['即時價']!s:>10} {d['開盤']!s:>10} {d['最高']!s:>10} {d['最低']!s:>10} {d['收盤']!s:>10} {d['成交量']!s:>15}")
+    print("-"*80)
+    for data in stock_data_list:
+        print(f"{data['股票']:<8} {data['即時價']:>10} {data['開盤']:>10} {data['最高']:>10} {data['最低']:>10} {data['收盤']:>10} {data['成交量']:>15}")
 
 # =========================
-# 主程式
+def fetch_last_month_history():
+    print("⏳ 抓取過去一個月歷史收盤價到單一檔案並寫入 SQL...")
+    ensure_history_csv()
+    for s in stocks:
+        stock = yf.Ticker(s)
+        df = stock.history(period="1mo")
+        for idx, row in df.iterrows():
+            date_str = idx.strftime("%Y-%m-%d")
+            close_price = row["Close"]
+
+            # CSV
+            save_history_csv(s, date_str, close_price)
+
+            # SQL
+            try:
+                cursor.execute("""
+                IF NOT EXISTS (
+                    SELECT 1 FROM dbo.stock_close WHERE date = ? AND stock_id = ?
+                )
+                INSERT INTO dbo.stock_close (date, stock_id, close_price) VALUES (?, ?, ?)
+                """, date_str, s, date_str, s, float(close_price))
+                conn.commit()
+            except Exception as e:
+                print(f"❌ SQL寫入失敗: {s} {date_str}, {e}")
+    print(f"✅ 過去一個月歷史收盤價已寫入 {HIST_CSV_FILE} + SQL")
+
+# =========================
 if __name__ == "__main__":
-    ensure_csv_file()
+    ensure_history_csv()
+    fetch_last_month_history()
     while True:
         all_data = []
         for s in stocks:
             data = get_stock_data(s)
             all_data.append(data)
-            save_to_csv(data)
-            save_to_sql(data)
+            if is_us_market_closed():
+                save_close_price(s, data["收盤"])
         display_realtime(all_data)
-        print(f"\n下一次更新: {update_interval//60} 分鐘後\n")
-        time.sleep(update_interval)
+        print(f"\n下一次更新: {stock_interval} 秒後")
+        time.sleep(stock_interval)
