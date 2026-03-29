@@ -37,7 +37,7 @@ def save_history_csv(stock_id, date_str, close_price):
 # =========================
 # SQL Server 連線
 server = 'linpeichunhappy.database.windows.net'
-database = 'stock_project'
+database = 'lin_project'
 username = 'missa'
 password = 'Cc12345678'
 driver = '{ODBC Driver 18 for SQL Server}'
